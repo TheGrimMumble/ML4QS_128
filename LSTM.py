@@ -1,23 +1,26 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+import torch.nn.functional as F
 import torch.optim as optim
 import pandas as pd
 import torchmetrics
+from sklearn.preprocessing import StandardScaler
 
 # Unchangable
 input_size = 31
 num_classes = 5
 
 # Hyperparameters
-hidden_size = 500
+hidden_size = 200
 num_layers = 32
-num_epochs = 1
+num_epochs = 3
 batch_size = 5
-learning_rate = 0.005
+learning_rate = 0.0005
 window_size = 3 # number of rounds that is considered, i.e. sequence length
 dropout_prob = 0.5
-
+gamma_loss = 3
+alpha_loss = 0.5 # loss function's weight scaling, higher means more proportional
 
 # Load the dataset
 read_data = pd.read_csv('df_final.csv')
@@ -26,10 +29,17 @@ class_counts = read_data['target'].value_counts()
 number_of_classes = len(class_counts)
 total_samples = len(read_data)
 
-# Calculate the weight for each class
-weights = total_samples / (number_of_classes * class_counts)
-weights_tensor = torch.tensor(weights.sort_index().values, dtype=torch.float)  # Ensure the order matches class labels
+# Calculate the proportional weight for each class
+proportional_weights = total_samples / (number_of_classes * class_counts)
 
+# Convert proportional_weights to a tensor
+proportional_weights_tensor = torch.tensor(proportional_weights.sort_index().values, dtype=torch.float)
+
+# Generate uniform weights using ones_like on the tensor
+uniform_weights_tensor = torch.ones_like(proportional_weights_tensor)
+
+# Adjust weights based on alpha
+weights_tensor = alpha_loss * proportional_weights_tensor + (1 - alpha_loss) * uniform_weights_tensor
 
 
 # Selecting the required features and target
@@ -48,7 +58,29 @@ columns = [
     'target'
 ]
 
-data = read_data[columns]
+scale_columns = [
+    'confidence score', 'experience score', 'games played prior on current day',
+    'winner_streak', 'prev_round_hit_corr', 'favorite fruit_prume', 'favorite fruit_strawberry',
+    'accelarator device_band', 'accelarator device_elastics', 'duration round_seconds',
+    'before3_mean', 'before3_min', 'before3_max',
+    'before2_mean', 'before2_min', 'before2_max',
+    'before1_mean', 'before1_min', 'before1_max',
+    'after1_mean', 'after1_min', 'after1_max',
+    'after2_mean', 'after2_min', 'after2_max',
+    'after3_mean', 'after3_min', 'after3_max',
+    'max_acc_value', 'max_acc_time', 'time_diff_max_acc',
+]
+
+# Initialize the StandardScaler
+scaler = StandardScaler()
+
+# Fit the scaler on the training data only
+train_features = read_data[read_data['game'].isin([2, 3, 4, 6])]  # Example training games
+scaler.fit(train_features[scale_columns])
+
+# Apply the transformation to all the data
+read_data[scale_columns] = scaler.transform(read_data[scale_columns])
+
 
 def create_sequences(df, window_size, game_number):
     sequences = []
@@ -68,10 +100,12 @@ def create_sequences(df, window_size, game_number):
                 sequences.append((sequence.values, target))
     return sequences
 
+data = read_data[columns]
 # Create the sequences, Game 1 and 5 as test and validation
 train_sequences = create_sequences(data, window_size, (2, 3, 4, 6))
 test_sequences = create_sequences(data, window_size, (0, 1))
 validation_sequences = create_sequences(data, window_size, (0, 5))
+
 
 class GameRoundsDataset(Dataset):
     def __init__(self, sequences):
@@ -133,6 +167,32 @@ def move_metrics_to_device(device):
     f1 = f1.to(device)
 
 
+class Attention(nn.Module):
+    def __init__(self, hidden_size):
+        super(Attention, self).__init__()
+        self.hidden_size = hidden_size
+        self.linear_in = nn.Linear(hidden_size, hidden_size)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, lstm_output, hidden):
+        # lstm_output : [batch_size, seq_length, hidden_size]
+        # hidden : [batch_size, hidden_size]
+
+        # Linear transformation
+        linear_out = self.linear_in(lstm_output)
+
+        # Dot product between the hidden state and each time step of the LSTM outputs
+        scores = torch.bmm(linear_out, hidden.unsqueeze(2)).squeeze(2)
+
+        # Apply softmax to get attention weights
+        attention_weights = self.softmax(scores)
+
+        # Multiply the attention weights with the lstm output to get the context vector
+        context_vector = torch.bmm(lstm_output.transpose(1, 2), attention_weights.unsqueeze(2)).squeeze(2)
+
+        return context_vector, attention_weights
+
+
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout_prob):
         super(LSTMModel, self).__init__()
@@ -143,6 +203,9 @@ class LSTMModel(nn.Module):
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout_prob if num_layers > 1 else 0.0)
         # Apply dropout if more than one layer
         # Shape of input = batch_size, sequence_length, input_size
+
+        # Attention layer
+        self.attention = Attention(hidden_size)
 
         # Dropout layer for applying after LSTM layers and before the linear layer
         self.dropout = nn.Dropout(dropout_prob)
@@ -173,20 +236,45 @@ class LSTMModel(nn.Module):
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)#.to(x.device)
         
         # Propagate input through LSTM
-        out, _ = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size)
+        # out, _ = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size)
+        # Propagate input through LSTM
+        lstm_out, (hn, cn) = self.lstm(x, (h0, c0))  # lstm_out: tensor of shape (batch_size, seq_length, hidden_size)
+
+        # Last hidden state
+        hn = hn[-1]  # Considering only the last layer's hidden state
+
+        # Attention layer
+        context_vector, attention_weights = self.attention(lstm_out, hn)
 
         # Apply dropout to the outputs of the LSTM layer
-        out = self.dropout(out[:, -1, :])  # Apply dropout to the last time step outputs before the linear layer
+        # out = self.dropout(out[:, -1, :])  # Apply dropout to the last time step outputs before the linear layer
+        # Decode the hidden state of the last time step
+        # out = self.linear(out)
+
+        # Apply dropout to the context vector
+        context_vector = self.dropout(context_vector)
 
         # Decode the hidden state of the last time step
-        out = self.linear(out)
-        return out
-    
+        out = self.linear(context_vector)
 
+        return out #, attention_weights # these weights are only used for interpretebility
+    
+class FocalLoss(nn.Module):
+    def __init__(self, gamma, alpha=None):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha  # Can be a float or a tensor with class weights
+
+    def forward(self, inputs, targets):
+        BCE_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+        pt = torch.exp(-BCE_loss)
+        F_loss = (1 - pt) ** self.gamma * BCE_loss
+        return F_loss.mean()
 
 model = LSTMModel(input_size, hidden_size, num_layers, num_classes, dropout_prob)
 
-loss_function = nn.CrossEntropyLoss(weight=weights_tensor)
+# loss_function = nn.CrossEntropyLoss(weight=weights_tensor)
+loss_function = FocalLoss(gamma_loss, alpha=weights_tensor)
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 
@@ -269,7 +357,7 @@ model.eval()  # Set the model to evaluation mode.
 with torch.no_grad():
     for i, (features, labels) in enumerate(test_loader):
         outputs = model(features)
-        _, predicted = torch.max(outputs.data, 1)
+        _, predicted = torch.max(outputs, dim=1)
         # Update metrics
         accuracy.update(predicted, labels)
         precision.update(predicted, labels)
