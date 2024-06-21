@@ -1,6 +1,7 @@
 name: ml4qs
 channels:
   - defaults
+  - conda-forge
 dependencies:
   - python
   - ipykernel
@@ -12,3 +13,6 @@ dependencies:
   - xgboost
   - pytorch
   - torchmetrics
+  - ray-tune
+  - async_timeout
+  - grpcio
