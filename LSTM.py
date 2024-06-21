@@ -12,15 +12,16 @@ input_size = 31
 num_classes = 5
 
 # Hyperparameters
-hidden_size = 200
-num_layers = 32
-num_epochs = 3
-batch_size = 5
+hidden_size = 32
+num_layers = 128
+num_epochs = 16
+batch_size = 16
 learning_rate = 0.0005
 window_size = 3 # number of rounds that is considered, i.e. sequence length
 dropout_prob = 0.5
-gamma_loss = 3
+gamma_loss = 2
 alpha_loss = 0.5 # loss function's weight scaling, higher means more proportional
+num_workers = 0
 
 # Load the dataset
 read_data = pd.read_csv('df_final.csv')
@@ -80,7 +81,9 @@ scaler.fit(train_features[scale_columns])
 
 # Apply the transformation to all the data
 read_data[scale_columns] = scaler.transform(read_data[scale_columns])
-
+data = read_data[columns]
+# data.to_csv('dataset.csv', index=False)
+cached_data = data.copy()
 
 def create_sequences(df, window_size, game_number):
     sequences = []
@@ -100,11 +103,10 @@ def create_sequences(df, window_size, game_number):
                 sequences.append((sequence.values, target))
     return sequences
 
-data = read_data[columns]
 # Create the sequences, Game 1 and 5 as test and validation
-train_sequences = create_sequences(data, window_size, (2, 3, 4, 6))
-test_sequences = create_sequences(data, window_size, (0, 1))
-validation_sequences = create_sequences(data, window_size, (0, 5))
+train_sequences = create_sequences(cached_data, window_size, (2, 3, 4, 6))
+test_sequences = create_sequences(cached_data, window_size, (0, 1))
+validation_sequences = create_sequences(cached_data, window_size, (0, 5))
 
 
 class GameRoundsDataset(Dataset):
@@ -120,13 +122,13 @@ class GameRoundsDataset(Dataset):
 
 # Create dataset
 train_dataset = GameRoundsDataset(train_sequences)
-train_loader = DataLoader(train_dataset, batch_size=batch_size)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
 test_dataset = GameRoundsDataset(test_sequences)
-test_loader = DataLoader(test_dataset, batch_size=batch_size)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
 val_dataset = GameRoundsDataset(validation_sequences)
-val_loader = DataLoader(val_dataset, batch_size=batch_size)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
 def testing_input_data(loader):
     # Testing the input data
@@ -157,14 +159,6 @@ accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
 precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, average='macro')
 recall = torchmetrics.Recall(task='multiclass', num_classes=num_classes, average='macro')
 f1 = torchmetrics.F1Score(task='multiclass', num_classes=num_classes, average='macro')
-
-
-def move_metrics_to_device(device):
-    # Move metrics to the appropriate device
-    accuracy = accuracy.to(device)
-    precision = precision.to(device)
-    recall = recall.to(device)
-    f1 = f1.to(device)
 
 
 class Attention(nn.Module):
