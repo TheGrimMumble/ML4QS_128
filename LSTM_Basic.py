@@ -70,7 +70,7 @@ eval_on_val_set = True
 model_path = 'LSTM_best_model_weights.pth' # for saving weights
 
 
-def get_weights_tensor(dataset, target_var_name):
+def get_weights_tensor(dataset, target_var_name, alpha_loss):
     class_counts = dataset[target_var_name].value_counts()
     number_of_classes = len(class_counts)
     total_samples = len(dataset)
@@ -246,7 +246,12 @@ class FocalLoss(nn.Module):
         return F_loss.mean()
 
 
-def training_model():
+def training_model(model, optimizer, loss_function, train_loader, validation_loader):
+    # Initialize metrics for training and evaluation
+    accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
+    precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, average='macro')
+    recall = torchmetrics.Recall(task='multiclass', num_classes=num_classes, average='macro')
+    f1 = torchmetrics.F1Score(task='multiclass', num_classes=num_classes, average='macro')
     best_val_loss = float('inf')
     metrics_df = pd.DataFrame(columns=['Epoch', 'Step', 'Loss-Value', 'Accuracy', 'Precision', 'Recall', 'F1 Score'])
     # Training
@@ -310,7 +315,13 @@ def training_model():
                 torch.save(model.state_dict(), model_path)
 
 
-def evaluate_model():
+def evaluate_model(model, test_loader):
+    # Initialize metrics for testing
+    accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes, average='none')
+    precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, average='none')
+    recall = torchmetrics.Recall(task='multiclass', num_classes=num_classes, average='none')
+    f1 = torchmetrics.F1Score(task='multiclass', num_classes=num_classes, average='none')
+    # Set up model
     model.load_state_dict(torch.load(model_path))
     model.eval()  # Set the model to evaluation mode.
     with torch.no_grad():
@@ -344,57 +355,202 @@ def evaluate_model():
     f1.reset()
 
 
+def run_manual():
+    weights_tensor = get_weights_tensor(dataset, target)
 
-# START OF SCRIPT
-weights_tensor = get_weights_tensor(dataset, target)
+    if random_data_split:
+        train_sequences, validation_sequences, test_sequences = sequences_random_split(dataset, window_size, game, round, target, train_split, validation_split, test_split)
+    else:
+        train_sequences = rolling_window_sequences(dataset, window_size, game, round, target, train_split)
+        validation_sequences = rolling_window_sequences(dataset, window_size, game, round, target, validation_split)
+        test_sequences = rolling_window_sequences(dataset, window_size, game, round, target, test_split)
 
-if random_data_split:
-    train_sequences, validation_sequences, test_sequences = sequences_random_split(dataset, window_size, game, round, target, train_split, validation_split, test_split)
-else:
-    train_sequences = rolling_window_sequences(dataset, window_size, game, round, target, train_split)
-    validation_sequences = rolling_window_sequences(dataset, window_size, game, round, target, validation_split)
-    test_sequences = rolling_window_sequences(dataset, window_size, game, round, target, test_split)
+    if standarization:
+        train_sequences = standardize_sequences(train_sequences)
+        validation_sequences = standardize_sequences(validation_sequences)
+        test_sequences = standardize_sequences(test_sequences)
 
-if standarization:
-    train_sequences = standardize_sequences(train_sequences)
-    validation_sequences = standardize_sequences(validation_sequences)
-    test_sequences = standardize_sequences(test_sequences)
+    # Create datasets
+    train_dataset = GameRoundsDataset(train_sequences)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers)
 
-# Create datasets
-train_dataset = GameRoundsDataset(train_sequences)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers)
+    validation_dataset = GameRoundsDataset(validation_sequences)
+    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=shuffle_validation, num_workers=num_workers)
 
-validation_dataset = GameRoundsDataset(validation_sequences)
-validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=shuffle_validation, num_workers=num_workers)
+    test_dataset = GameRoundsDataset(test_sequences)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle_test, num_workers=num_workers)
 
-test_dataset = GameRoundsDataset(test_sequences)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle_test, num_workers=num_workers)
+    # Instantiate the model
+    model = LSTMModel(input_size, hidden_size, num_layers, num_classes, 
+                    dropout_prob, use_attention, use_dropout, use_xavier_init)
+    if focal_loss:
+        loss_function = FocalLoss(gamma_loss, alpha=weights_tensor)
+    else:
+        loss_function = nn.CrossEntropyLoss(weight=weights_tensor)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-# Instantiate the model
-model = LSTMModel(input_size, hidden_size, num_layers, num_classes, 
-                  dropout_prob, use_attention, use_dropout, use_xavier_init)
-if focal_loss:
-    loss_function = FocalLoss(gamma_loss, alpha=weights_tensor)
-else:
-    loss_function = nn.CrossEntropyLoss(weight=weights_tensor)
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # Train model
+    training_model(model, optimizer, loss_function, train_loader, validation_loader)
 
-# Initialize metrics for training
-accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
-precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, average='macro')
-recall = torchmetrics.Recall(task='multiclass', num_classes=num_classes, average='macro')
-f1 = torchmetrics.F1Score(task='multiclass', num_classes=num_classes, average='macro')
+    # Evaluate model
+    evaluate_model(model, test_loader)
 
-# Train model
-training_model()
 
-# Initialize metrics for testing
-accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes, average='none')
-precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, average='none')
-recall = torchmetrics.Recall(task='multiclass', num_classes=num_classes, average='none')
-f1 = torchmetrics.F1Score(task='multiclass', num_classes=num_classes, average='none')
+# run_manual()
 
-# Evaluate model
-evaluate_model()
+import os
+import ray
+from ray import tune
+from ray.tune import CLIReporter
+from ray.tune.schedulers import ASHAScheduler
 
-# END OF SCRIPT
+
+
+def train_model(config):
+    # Configure device for training
+    device = torch.device("cpu")
+    
+    # Adjust the configuration to the given model parameters
+    num_epochs = config["num_epochs"]
+    batch_size = config["batch_size"]
+    window_size = config["window_size"]
+    hidden_size = config["hidden_size"]
+    num_layers = config["num_layers"]
+    learning_rate = config["learning_rate"]
+    dropout_prob = config["dropout_prob"]
+    alpha_loss = config["alpha_loss"]
+    gamma_loss = config.get("gamma_loss", 2.0)  # Default gamma value if not using focal loss
+
+    # Dataset splits and options
+    if config["random_data_split"]:
+        train_split = config["train_split"]
+        validation_split = ((1 - config["train_split"]) / 2)
+        test_split = ((1 - config["train_split"]) / 2)
+    else:
+        train_split, validation_split, test_split = (0, 2, 3, 4, 6), (0, 5), (0, 1)
+
+    # Load and prepare datasets
+    load_dataset = pd.read_csv('/Users/silverwhisper/ML4QS_128/df_final.csv')
+    dataset = load_dataset[selected_features]
+    target_var_name = 'target'
+    
+    if config["random_data_split"]:
+        train_sequences, validation_sequences, test_sequences = sequences_random_split(
+            dataset, window_size, 'game', 'round', target_var_name, train_split, validation_split, test_split)
+    else:
+        train_sequences = rolling_window_sequences(dataset, window_size, 'game', 'round', target_var_name, train_split)
+        validation_sequences = rolling_window_sequences(dataset, window_size, 'game', 'round', target_var_name, validation_split)
+        test_sequences = rolling_window_sequences(dataset, window_size, 'game', 'round', target_var_name, test_split)
+
+    if config["standarization"]:
+        train_sequences = standardize_sequences(train_sequences)
+        validation_sequences = standardize_sequences(validation_sequences)
+        test_sequences = standardize_sequences(test_sequences)
+
+    train_dataset = GameRoundsDataset(train_sequences)
+    validation_dataset = GameRoundsDataset(validation_sequences)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=config["shuffle_train"], num_workers=0)
+    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=config["shuffle_validation"], num_workers=0)
+
+    # Instantiate the model
+    model = LSTMModel(input_size, hidden_size, num_layers, num_classes, 
+                      dropout_prob, config["use_attention"], config["use_dropout"], config["use_xavier_init"]).to(device)
+
+    # Define loss function and optimizer
+    weights_tensor = get_weights_tensor(dataset, target_var_name, alpha_loss).to(device)
+    if config["focal_loss"]:
+        loss_function = FocalLoss(gamma_loss, alpha=weights_tensor)
+    else:
+        loss_function = torch.nn.CrossEntropyLoss(weight=weights_tensor)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()
+        for i, (features, labels) in enumerate(train_loader):
+            features, labels = features.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(features)
+            loss = loss_function(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            # Reporting results to Ray Tune after each epoch
+            if i % 10 == 0:  # Report every 10 batches, adjust this as per your requirements
+                tune.report(loss=loss.item(), epoch=epoch, training_iteration=i)
+        model.eval()  # Set the model to evaluation mode
+        total_val_loss = 0
+        total_val_batches = 0
+        with torch.no_grad():
+            for features, labels in validation_loader:
+                features, labels = features.to(device), labels.to(device)
+                outputs = model(features)
+                val_loss = loss_function(outputs, labels)
+                total_val_loss += val_loss.item()
+                total_val_batches += 1
+        avg_val_loss = total_val_loss / total_val_batches if total_val_batches > 0 else 0
+        tune.report(validation_loss=avg_val_loss)  # Reporting validation loss to Ray Tune
+
+
+
+# Ray Tune configuration:
+config = {
+    "random_data_split": tune.grid_search([True, False]),
+    "train_split": tune.grid_search([0.5, 0.7]),
+    "standarization": tune.grid_search([True, False]),
+    "shuffle_train": tune.grid_search([True, False]),
+    "shuffle_validation": tune.grid_search([True, False]),
+    "shuffle_test": tune.grid_search([True, False]),
+    "use_attention": tune.grid_search([True, False]),
+    "use_dropout": tune.grid_search([True, False]),
+    "use_xavier_init": tune.grid_search([True, False]),
+    "num_epochs": tune.grid_search([64, 128]),
+    "batch_size": tune.grid_search([16, 32, 48]),
+    "window_size": tune.grid_search([2, 4]),
+    "hidden_size": tune.grid_search([32, 64, 128, 256]),
+    "num_layers": tune.grid_search([1, 2, 4, 8, 16, 32, 64]),
+    "learning_rate": tune.grid_search([0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]),
+    "dropout_prob": tune.grid_search([0.3, 0.4, 0.5, 0.6]),
+    "alpha_loss": tune.grid_search([0, 0.25, 0.5, 0.75, 1]),
+    "focal_loss": tune.grid_search([True, False]),
+    "gamma_loss": tune.grid_search([1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5])
+}
+
+# Optional: setup Ray Tune's scheduler and reporter for better resource management and reporting
+scheduler = ASHAScheduler(
+    metric="loss",
+    mode="min",
+    max_t=100,
+    grace_period=10,
+    reduction_factor=2
+)
+
+# Configuration of CLIReporter
+reporter = CLIReporter(
+    metric_columns=["loss", "accuracy", "validation_loss", "epoch", "training_iteration"],
+    parameter_columns=["num_epochs", "batch_size", "hidden_size", "learning_rate", "dropout_prob"],
+    print_intermediate_tables=True,  # To print updates regularly
+    max_report_frequency=10  # Number of seconds between updates
+)
+
+ray.shutdown()  # Ensure that Ray is not already running
+ray.init(num_cpus=1)  # Adjust to the number of CPUs you want to use
+
+result = tune.run(
+    train_model,
+    resources_per_trial={"cpu": 1},
+    config=config,
+    num_samples=1,
+    scheduler=scheduler,
+    progress_reporter=reporter,
+    resume=True
+)
+"""
+best_trial = result.get_best_trial("loss", "min", "last")
+print("Best trial config: {}".format(best_trial.config))
+print("Best trial final validation loss: {}".format(best_trial.last_result["loss"]))
+print("Best trial final validation accuracy: {}".format(best_trial.last_result["accuracy"]))
+
+"""
