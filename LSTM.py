@@ -6,23 +6,32 @@ import torch.optim as optim
 import pandas as pd
 import torchmetrics
 from sklearn.preprocessing import StandardScaler
+import random
 
 # Unchangable
 input_size = 8
 num_classes = 5
 
 # Hyperparameters
+train_ratio = 0.7
+validation_ratio = 0.15
+test_ratio = 0.15
+
+num_epochs = 64
+batch_size = 32
+window_size = 2 # number of rounds that is considered, i.e. sequence length
+
 hidden_size = 64
 num_layers = 16
-num_epochs = 16
-batch_size = 32
 learning_rate = 0.005
-window_size = 2 # number of rounds that is considered, i.e. sequence length
 dropout_prob = 0.5
-gamma_loss = 3.7
+
+gamma_loss = 3.5
 alpha_loss = 0.5 # loss function's weight scaling, higher means more proportional
+
 num_workers = 0
-eval_param = False
+eval_on_val_set = True
+
 
 # Load the dataset
 read_data = pd.read_csv('df_final.csv')
@@ -91,7 +100,7 @@ data = read_data[columns]
 # data.to_csv('dataset.csv', index=False)
 cached_data = data.copy()
 
-def create_sequences(df, window_size, game_number):
+def create_rolling_win_sequences(df, window_size, game_number):
     sequences = []
     for game, group in df.groupby('game'):
         if game in game_number:
@@ -109,10 +118,52 @@ def create_sequences(df, window_size, game_number):
                 sequences.append((sequence.values, target))
     return sequences
 
+def create_non_overlapping_sequences(df, window_size, game_number):
+    sequences = []
+    for game, group in df.groupby('game'):
+        if game in game_number:
+            # Ensure the data is sorted by round within each game
+            group = group.sort_values('round')
+            # Drop the game and round columns for modeling
+            features = group.drop(columns=['game', 'round'])
+            # Create non-overlapping sequences
+            I = 0
+            while I + window_size <= len(group):
+                sequence = features.iloc[I:I+window_size]
+                # Use the target of the last round in the window
+                target = sequence.iloc[-1]['target']
+                # Remove the target from features
+                sequence = sequence.drop(columns='target')
+                sequences.append((sequence.values, target))
+                I += window_size
+    return sequences
+
 # Create the sequences, Game 1 and 5 as test and validation
-train_sequences = create_sequences(cached_data, window_size, (2, 3, 4, 6))
-test_sequences = create_sequences(cached_data, window_size, (0, 1))
-validation_sequences = create_sequences(cached_data, window_size, (0, 5))
+# train_sequences = create_rolling_win_sequences(cached_data, window_size, (2, 3, 4, 6))
+# test_sequences = create_rolling_win_sequences(cached_data, window_size, (0, 1))
+# validation_sequences = create_rolling_win_sequences(cached_data, window_size, (0, 5))
+sequences = create_non_overlapping_sequences(cached_data, window_size, (1, 2, 3, 4, 5, 6))
+
+def split_sequences(sequences, train_ratio, validation_ratio, test_ratio):
+    # Ensure the ratios sum to 1
+    assert train_ratio + validation_ratio + test_ratio == 1, "The ratios must sum to 1."
+
+    # Shuffle the sequences randomly
+    random.shuffle(sequences)
+
+    # Calculate the number of sequences for each set
+    total_sequences = len(sequences)
+    train_end = int(train_ratio * total_sequences)
+    validation_end = train_end + int(validation_ratio * total_sequences)
+
+    # Split the sequences
+    train_sequences = sequences[:train_end]
+    validation_sequences = sequences[train_end:validation_end]
+    test_sequences = sequences[validation_end:]
+
+    return train_sequences, validation_sequences, test_sequences
+
+train_sequences, validation_sequences, test_sequences = split_sequences(sequences, train_ratio, validation_ratio, test_ratio)
 
 
 class GameRoundsDataset(Dataset):
@@ -328,7 +379,7 @@ for epoch in range(num_epochs):  # Loop over the dataset multiple times
         precision.reset()
         recall.reset()
         f1.reset()
-        if eval_param == True:
+        if eval_on_val_set == True:
             # Validation phase
             model.eval()  # Set model to evaluation mode
             total_val_loss = 0
