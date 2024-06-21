@@ -7,22 +7,24 @@ import pandas as pd
 import torchmetrics
 from sklearn.preprocessing import StandardScaler
 
+# Set the device to GPU if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
 # Unchangable
-input_size = 8
+input_size = 31
 num_classes = 5
 
 # Hyperparameters
-hidden_size = 64
-num_layers = 16
-num_epochs = 16
-batch_size = 32
-learning_rate = 0.005
-window_size = 2 # number of rounds that is considered, i.e. sequence length
+hidden_size = 200
+num_layers = 32
+num_epochs = 3
+batch_size = 5
+learning_rate = 0.0005
+window_size = 3 # number of rounds that is considered, i.e. sequence length
 dropout_prob = 0.5
-gamma_loss = 3.7
+gamma_loss = 3
 alpha_loss = 0.5 # loss function's weight scaling, higher means more proportional
-num_workers = 0
-eval_param = False
 
 # Load the dataset
 read_data = pd.read_csv('df_final.csv')
@@ -45,7 +47,7 @@ weights_tensor = alpha_loss * proportional_weights_tensor + (1 - alpha_loss) * u
 
 
 # Selecting the required features and target
-old_columns = [
+columns = [
     'game', 'round',
     'confidence score', 'experience score', 'games played prior on current day',
     'winner_streak', 'prev_round_hit_corr', 'favorite fruit_prume', 'favorite fruit_strawberry',
@@ -59,11 +61,6 @@ old_columns = [
     'max_acc_value', 'max_acc_time', 'time_diff_max_acc',
     'target'
 ]
-
-columns = ['game', 'round',
-    'max_acc_value', 'games played prior on current day', 'experience score', 'after2_mean', 'after3_min',
-    'before1_mean', 'after3_max', 'winner_streak',
-    'target']
 
 scale_columns = [
     'confidence score', 'experience score', 'games played prior on current day',
@@ -87,9 +84,7 @@ scaler.fit(train_features[scale_columns])
 
 # Apply the transformation to all the data
 read_data[scale_columns] = scaler.transform(read_data[scale_columns])
-data = read_data[columns]
-# data.to_csv('dataset.csv', index=False)
-cached_data = data.copy()
+
 
 def create_sequences(df, window_size, game_number):
     sequences = []
@@ -109,10 +104,11 @@ def create_sequences(df, window_size, game_number):
                 sequences.append((sequence.values, target))
     return sequences
 
+data = read_data[columns]
 # Create the sequences, Game 1 and 5 as test and validation
-train_sequences = create_sequences(cached_data, window_size, (2, 3, 4, 6))
-test_sequences = create_sequences(cached_data, window_size, (0, 1))
-validation_sequences = create_sequences(cached_data, window_size, (0, 5))
+train_sequences = create_sequences(data, window_size, (2, 3, 4, 6))
+test_sequences = create_sequences(data, window_size, (0, 1))
+validation_sequences = create_sequences(data, window_size, (0, 5))
 
 
 class GameRoundsDataset(Dataset):
@@ -128,13 +124,13 @@ class GameRoundsDataset(Dataset):
 
 # Create dataset
 train_dataset = GameRoundsDataset(train_sequences)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+train_loader = DataLoader(train_dataset, batch_size=batch_size)
 
 test_dataset = GameRoundsDataset(test_sequences)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+test_loader = DataLoader(test_dataset, batch_size=batch_size)
 
 val_dataset = GameRoundsDataset(validation_sequences)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
 def testing_input_data(loader):
     # Testing the input data
@@ -165,6 +161,13 @@ accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
 precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, average='macro')
 recall = torchmetrics.Recall(task='multiclass', num_classes=num_classes, average='macro')
 f1 = torchmetrics.F1Score(task='multiclass', num_classes=num_classes, average='macro')
+
+
+
+accuracy = accuracy.to(device)
+precision = precision.to(device)
+recall = recall.to(device)
+f1 = f1.to(device)
 
 
 class Attention(nn.Module):
@@ -232,8 +235,8 @@ class LSTMModel(nn.Module):
 
     def forward(self, x):
         # Initialize hidden state and cell state with zeros
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)#.to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size)#.to(x.device)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         
         # Propagate input through LSTM
         # out, _ = self.lstm(x, (h0, c0))  # out: tensor of shape (batch_size, seq_length, hidden_size)
@@ -271,7 +274,7 @@ class FocalLoss(nn.Module):
         F_loss = (1 - pt) ** self.gamma * BCE_loss
         return F_loss.mean()
 
-model = LSTMModel(input_size, hidden_size, num_layers, num_classes, dropout_prob)
+model = LSTMModel(input_size, hidden_size, num_layers, num_classes, dropout_prob).to(device)
 
 # loss_function = nn.CrossEntropyLoss(weight=weights_tensor)
 loss_function = FocalLoss(gamma_loss, alpha=weights_tensor)
@@ -289,6 +292,7 @@ metrics_df = pd.DataFrame(columns=['Epoch', 'Step', 'Loss-Value', 'Accuracy', 'P
 # Training
 for epoch in range(num_epochs):  # Loop over the dataset multiple times
     for i, (features, labels) in enumerate(train_loader):
+        features, labels = features.to(device), labels.to(device)
         model.train()
         # Zero the parameter gradients and forward pass
         optimizer.zero_grad()
@@ -328,23 +332,20 @@ for epoch in range(num_epochs):  # Loop over the dataset multiple times
         precision.reset()
         recall.reset()
         f1.reset()
-        if eval_param == True:
-            # Validation phase
-            model.eval()  # Set model to evaluation mode
-            total_val_loss = 0
-            with torch.no_grad():
-                for features, labels in val_loader:
-                    outputs = model(features)
-                    val_loss = loss_function(outputs, labels)
-                    total_val_loss += val_loss.item()
-            avg_val_loss = total_val_loss / len(val_loader)
-            # Save the model if the validation loss is the best
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                torch.save(model.state_dict(), model_path)
-                print(f'Saved better model on epoch: {epoch+1}, step: {i+1} with validation loss: {avg_val_loss:.4f}')
-        else:
+        # Validation phase
+        model.eval()  # Set model to evaluation mode
+        total_val_loss = 0
+        with torch.no_grad():
+            for features, labels in val_loader:
+                outputs = model(features)
+                val_loss = loss_function(outputs, labels)
+                total_val_loss += val_loss.item()
+        avg_val_loss = total_val_loss / len(val_loader)
+        # Save the model if the validation loss is the best
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             torch.save(model.state_dict(), model_path)
+            print(f'Saved better model on epoch: {epoch+1}, step: {i+1} with validation loss: {avg_val_loss:.4f}')
 
 
 # Initialize metrics
@@ -353,12 +354,18 @@ precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, a
 recall = torchmetrics.Recall(task='multiclass', num_classes=num_classes, average='none')
 f1 = torchmetrics.F1Score(task='multiclass', num_classes=num_classes, average='none')
 
+accuracy = accuracy.to(device)
+precision = precision.to(device)
+recall = recall.to(device)
+f1 = f1.to(device)
+
 target_labels = {0: 'hit_correct', 1: 'hit_incorrect', 2: 'no_hit', 3: 'other_hit_correct', 4: 'other_hit_incorrect'}
 
 model.load_state_dict(torch.load(model_path))
 model.eval()  # Set the model to evaluation mode.
 with torch.no_grad():
     for i, (features, labels) in enumerate(test_loader):
+        features, labels = features.to(device), labels.to(device)
         outputs = model(features)
         _, predicted = torch.max(outputs, dim=1)
         # Update metrics

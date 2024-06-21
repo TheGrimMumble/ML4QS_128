@@ -1,0 +1,14 @@
+name: ml4qs
+channels:
+  - defaults
+dependencies:
+  - python
+  - ipykernel
+  - numpy
+  - pandas
+  - matplotlib
+  - scipy
+  - scikit-learn
+  - xgboost
+  - pytorch
+  - torchmetrics
