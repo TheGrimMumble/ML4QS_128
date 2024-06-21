@@ -165,19 +165,25 @@ class GameRoundsDataset(Dataset):
 class Attention(nn.Module):
     def __init__(self, hidden_size):
         super(Attention, self).__init__()
-        self.attention = nn.Linear(hidden_size, hidden_size)
-        self.tanh = nn.Tanh()
-        self.softmax = nn.Softmax(dim=1)
+        self.hidden_size = hidden_size
+        self.linear_in = nn.Linear(hidden_size, hidden_size)
+        self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, lstm_out, final_hidden_state):
-        attn_weights = self.softmax(self.tanh(self.attention(final_hidden_state)))
-        context_vector = torch.bmm(attn_weights.unsqueeze(1), lstm_out).squeeze(1)
-        return context_vector, attn_weights
+    def forward(self, lstm_output, hidden):
+        # Linear transformation
+        linear_out = self.linear_in(lstm_output)
+        # Dot product between the hidden state and each time step of the LSTM outputs
+        scores = torch.bmm(linear_out, hidden.unsqueeze(2)).squeeze(2)
+        # Apply softmax to get attention weights
+        attention_weights = self.softmax(scores)
+        # Multiply the attention weights with the lstm output to get the context vector
+        context_vector = torch.bmm(lstm_output.transpose(1, 2), attention_weights.unsqueeze(2)).squeeze(2)
+        return context_vector, attention_weights
 
 
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, num_classes, 
-                 dropout_prob, use_attention=False, use_dropout=False, use_xavier_init=False):
+                 dropout_prob, use_attention, use_dropout, use_xavier_init):
         super(LSTMModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -356,7 +362,7 @@ def evaluate_model(model, test_loader):
 
 
 def run_manual():
-    weights_tensor = get_weights_tensor(dataset, target)
+    weights_tensor = get_weights_tensor(dataset, target, alpha_loss)
 
     if random_data_split:
         train_sequences, validation_sequences, test_sequences = sequences_random_split(dataset, window_size, game, round, target, train_split, validation_split, test_split)
@@ -400,11 +406,11 @@ def run_manual():
 
 import os
 import ray
-from ray import tune
-from ray.tune import CLIReporter
+from ray import train, tune
+from ray.tune import TuneConfig, CLIReporter
 from ray.tune.schedulers import ASHAScheduler
 
-
+w_dir = os.getcwd()
 
 def train_model(config):
     # Configure device for training
@@ -430,7 +436,7 @@ def train_model(config):
         train_split, validation_split, test_split = (0, 2, 3, 4, 6), (0, 5), (0, 1)
 
     # Load and prepare datasets
-    load_dataset = pd.read_csv('/Users/silverwhisper/ML4QS_128/df_final.csv')
+    load_dataset = pd.read_csv(f'{w_dir}/df_final.csv')
     dataset = load_dataset[selected_features]
     target_var_name = 'target'
     
@@ -479,7 +485,7 @@ def train_model(config):
 
             # Reporting results to Ray Tune after each epoch
             if i % 10 == 0:  # Report every 10 batches, adjust this as per your requirements
-                tune.report(loss=loss.item(), epoch=epoch, training_iteration=i)
+                tune.report({"loss": loss.item()}) #, "epoch": epoch, "training_iteration": i
         model.eval()  # Set the model to evaluation mode
         total_val_loss = 0
         total_val_batches = 0
@@ -491,7 +497,7 @@ def train_model(config):
                 total_val_loss += val_loss.item()
                 total_val_batches += 1
         avg_val_loss = total_val_loss / total_val_batches if total_val_batches > 0 else 0
-        tune.report(validation_loss=avg_val_loss)  # Reporting validation loss to Ray Tune
+        train.report({"validation_loss": avg_val_loss})  # Reporting validation loss to Ray Tune
 
 
 
@@ -535,22 +541,34 @@ reporter = CLIReporter(
     max_report_frequency=10  # Number of seconds between updates
 )
 
+tune_config = TuneConfig(
+    metric="loss",  # Metric to optimize
+    mode="min",     # Minimize the metric ("min" or "max")
+    num_samples=10, # Number of times to sample from the hyperparameter space
+    scheduler=ASHAScheduler(
+        metric="loss",
+        mode="min",
+        max_t=100,
+        grace_period=10,
+        reduction_factor=2
+    )
+)
+
+
 ray.shutdown()  # Ensure that Ray is not already running
 ray.init(num_cpus=1)  # Adjust to the number of CPUs you want to use
 
 result = tune.run(
     train_model,
-    resources_per_trial={"cpu": 1},
     config=config,
+    resources_per_trial={"cpu": 1},
     num_samples=1,
     scheduler=scheduler,
     progress_reporter=reporter,
-    resume=True
 )
-"""
+
 best_trial = result.get_best_trial("loss", "min", "last")
 print("Best trial config: {}".format(best_trial.config))
 print("Best trial final validation loss: {}".format(best_trial.last_result["loss"]))
 print("Best trial final validation accuracy: {}".format(best_trial.last_result["accuracy"]))
 
-"""
