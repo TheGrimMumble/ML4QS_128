@@ -13,6 +13,4 @@ dependencies:
   - xgboost
   - pytorch
   - torchmetrics
-  - ray-tune
-  - async_timeout
-  - grpcio
+  - optuna

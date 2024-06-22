@@ -252,7 +252,7 @@ class FocalLoss(nn.Module):
         return F_loss.mean()
 
 
-def training_model(model, optimizer, loss_function, train_loader, validation_loader):
+def training_model(model, optimizer, loss_function, num_epochs, train_loader, validation_loader):
     # Initialize metrics for training and evaluation
     accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=num_classes)
     precision = torchmetrics.Precision(task='multiclass', num_classes=num_classes, average='macro')
@@ -319,6 +319,7 @@ def training_model(model, optimizer, loss_function, train_loader, validation_loa
                     print(f'Saved better model on epoch: {epoch+1}, step: {i+1} with validation loss: {avg_val_loss:.4f}')
             else:
                 torch.save(model.state_dict(), model_path)
+    return best_val_loss
 
 
 def evaluate_model(model, test_loader):
@@ -396,7 +397,7 @@ def run_manual():
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Train model
-    training_model(model, optimizer, loss_function, train_loader, validation_loader)
+    val_loss = training_model(model, optimizer, loss_function, num_epochs, train_loader, validation_loader)
 
     # Evaluate model
     evaluate_model(model, test_loader)
@@ -404,171 +405,87 @@ def run_manual():
 
 # run_manual()
 
-import os
-import ray
-from ray import train, tune
-from ray.tune import TuneConfig, CLIReporter
-from ray.tune.schedulers import ASHAScheduler
 
-w_dir = os.getcwd()
+import optuna
+import joblib
 
-def train_model(config):
-    # Configure device for training
-    device = torch.device("cpu")
-    
-    # Adjust the configuration to the given model parameters
-    num_epochs = config["num_epochs"]
-    batch_size = config["batch_size"]
-    window_size = config["window_size"]
-    hidden_size = config["hidden_size"]
-    num_layers = config["num_layers"]
-    learning_rate = config["learning_rate"]
-    dropout_prob = config["dropout_prob"]
-    alpha_loss = config["alpha_loss"]
-    gamma_loss = config.get("gamma_loss", 2.0)  # Default gamma value if not using focal loss
 
-    # Dataset splits and options
-    if config["random_data_split"]:
-        train_split = config["train_split"]
-        validation_split = ((1 - config["train_split"]) / 2)
-        test_split = ((1 - config["train_split"]) / 2)
+def objective(trial):
+    # Hyperparameters to be optimized
+    random_data_split = trial.suggest_categorical("random_data_split", [True, False])
+    train_split = trial.suggest_categorical("train_split", [0.5, 0.7])
+    standarization = trial.suggest_categorical("standarization", [True, False])
+    shuffle_train = trial.suggest_categorical("shuffle_train", [True, False])
+    shuffle_validation = trial.suggest_categorical("shuffle_validation", [True, False])
+    shuffle_test = trial.suggest_categorical("shuffle_test", [True, False])
+    use_attention = trial.suggest_categorical("use_attention", [True, False])
+    use_dropout = trial.suggest_categorical("use_dropout", [True, False])
+    use_xavier_init = trial.suggest_categorical("use_xavier_init", [True, False])
+    num_epochs = trial.suggest_categorical("num_epochs", [48, 80])
+    batch_size = trial.suggest_categorical("batch_size", [24, 32])
+    window_size = trial.suggest_categorical("window_size", [2, 4])
+    hidden_size = trial.suggest_categorical("hidden_size", [32, 64, 128])
+    num_layers = trial.suggest_categorical("num_layers", [8, 16, 32])
+    learning_rate = trial.suggest_categorical("learning_rate", [0.001, 0.005, 0.01])
+    dropout_prob = trial.suggest_categorical("dropout_prob", [0.3, 0.4, 0.5])
+    alpha_loss = trial.suggest_categorical("alpha_loss", [0, 0.4, 0.7, 1])
+    focal_loss = trial.suggest_categorical("focal_loss", [True, False])
+    gamma_loss = trial.suggest_categorical("gamma_loss", [2.0, 2.5, 3.0, 3.5])
+
+    # Load dataset, define splits based on random_data_split
+    # Create the data splits based on `random_data_split` and `train_split`
+    if random_data_split:
+        validation_split, test_split = ((1 - train_split) / 2, (1 - train_split) / 2)
+        train_sequences, validation_sequences, test_sequences = sequences_random_split(
+            dataset, window_size, game, round, target, train_split, validation_split, test_split)
     else:
         train_split, validation_split, test_split = (0, 2, 3, 4, 6), (0, 5), (0, 1)
+        # Data preprocessing, etc.
+        train_sequences = rolling_window_sequences(dataset, window_size, game, round, target, train_split)
+        validation_sequences = rolling_window_sequences(dataset, window_size, game, round, target, validation_split)
+        test_sequences = rolling_window_sequences(dataset, window_size, game, round, target, test_split)
 
-    # Load and prepare datasets
-    load_dataset = pd.read_csv(f'{w_dir}/df_final.csv')
-    dataset = load_dataset[selected_features]
-    target_var_name = 'target'
-    
-    if config["random_data_split"]:
-        train_sequences, validation_sequences, test_sequences = sequences_random_split(
-            dataset, window_size, 'game', 'round', target_var_name, train_split, validation_split, test_split)
-    else:
-        train_sequences = rolling_window_sequences(dataset, window_size, 'game', 'round', target_var_name, train_split)
-        validation_sequences = rolling_window_sequences(dataset, window_size, 'game', 'round', target_var_name, validation_split)
-        test_sequences = rolling_window_sequences(dataset, window_size, 'game', 'round', target_var_name, test_split)
-
-    if config["standarization"]:
+    if standarization:
         train_sequences = standardize_sequences(train_sequences)
         validation_sequences = standardize_sequences(validation_sequences)
         test_sequences = standardize_sequences(test_sequences)
 
-    train_dataset = GameRoundsDataset(train_sequences)
-    validation_dataset = GameRoundsDataset(validation_sequences)
+    # DataLoader
+    train_loader = DataLoader(GameRoundsDataset(train_sequences), batch_size=batch_size, shuffle=shuffle_train, num_workers=num_workers)
+    validation_loader = DataLoader(GameRoundsDataset(validation_sequences), batch_size=batch_size, shuffle=shuffle_validation, num_workers=num_workers)
+    test_loader = DataLoader(GameRoundsDataset(test_sequences), batch_size=batch_size, shuffle=shuffle_test, num_workers=num_workers)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=config["shuffle_train"], num_workers=0)
-    validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=config["shuffle_validation"], num_workers=0)
-
-    # Instantiate the model
-    model = LSTMModel(input_size, hidden_size, num_layers, num_classes, 
-                      dropout_prob, config["use_attention"], config["use_dropout"], config["use_xavier_init"]).to(device)
-
-    # Define loss function and optimizer
-    weights_tensor = get_weights_tensor(dataset, target_var_name, alpha_loss).to(device)
-    if config["focal_loss"]:
+    # Model instantiation
+    model = LSTMModel(input_size, hidden_size, num_layers, num_classes, dropout_prob, use_attention, use_dropout, use_xavier_init)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    weights_tensor = get_weights_tensor(dataset, target, alpha_loss)
+    
+    if focal_loss:
         loss_function = FocalLoss(gamma_loss, alpha=weights_tensor)
     else:
-        loss_function = torch.nn.CrossEntropyLoss(weight=weights_tensor)
+        loss_function = nn.CrossEntropyLoss(weight=weights_tensor)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-    # Training loop
-    for epoch in range(num_epochs):
-        model.train()
-        for i, (features, labels) in enumerate(train_loader):
-            features, labels = features.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(features)
-            loss = loss_function(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-            # Reporting results to Ray Tune after each epoch
-            if i % 10 == 0:  # Report every 10 batches, adjust this as per your requirements
-                tune.report({"loss": loss.item()}) #, "epoch": epoch, "training_iteration": i
-        model.eval()  # Set the model to evaluation mode
-        total_val_loss = 0
-        total_val_batches = 0
-        with torch.no_grad():
-            for features, labels in validation_loader:
-                features, labels = features.to(device), labels.to(device)
-                outputs = model(features)
-                val_loss = loss_function(outputs, labels)
-                total_val_loss += val_loss.item()
-                total_val_batches += 1
-        avg_val_loss = total_val_loss / total_val_batches if total_val_batches > 0 else 0
-        train.report({"validation_loss": avg_val_loss})  # Reporting validation loss to Ray Tune
+    # Here you could add your training and validation logic
+    # For simplicity, let's say it returns the validation loss
+    val_loss = training_model(model, optimizer, loss_function, num_epochs, train_loader, validation_loader)
+    return val_loss
 
 
-
-# Ray Tune configuration:
-config = {
-    "random_data_split": tune.grid_search([True, False]),
-    "train_split": tune.grid_search([0.5, 0.7]),
-    "standarization": tune.grid_search([True, False]),
-    "shuffle_train": tune.grid_search([True, False]),
-    "shuffle_validation": tune.grid_search([True, False]),
-    "shuffle_test": tune.grid_search([True, False]),
-    "use_attention": tune.grid_search([True, False]),
-    "use_dropout": tune.grid_search([True, False]),
-    "use_xavier_init": tune.grid_search([True, False]),
-    "num_epochs": tune.grid_search([64, 128]),
-    "batch_size": tune.grid_search([16, 32, 48]),
-    "window_size": tune.grid_search([2, 4]),
-    "hidden_size": tune.grid_search([32, 64, 128, 256]),
-    "num_layers": tune.grid_search([1, 2, 4, 8, 16, 32, 64]),
-    "learning_rate": tune.grid_search([0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]),
-    "dropout_prob": tune.grid_search([0.3, 0.4, 0.5, 0.6]),
-    "alpha_loss": tune.grid_search([0, 0.25, 0.5, 0.75, 1]),
-    "focal_loss": tune.grid_search([True, False]),
-    "gamma_loss": tune.grid_search([1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5])
-}
-
-# Optional: setup Ray Tune's scheduler and reporter for better resource management and reporting
-scheduler = ASHAScheduler(
-    metric="loss",
-    mode="min",
-    max_t=100,
-    grace_period=10,
-    reduction_factor=2
-)
-
-# Configuration of CLIReporter
-reporter = CLIReporter(
-    metric_columns=["loss", "accuracy", "validation_loss", "epoch", "training_iteration"],
-    parameter_columns=["num_epochs", "batch_size", "hidden_size", "learning_rate", "dropout_prob"],
-    print_intermediate_tables=True,  # To print updates regularly
-    max_report_frequency=10  # Number of seconds between updates
-)
-
-tune_config = TuneConfig(
-    metric="loss",  # Metric to optimize
-    mode="min",     # Minimize the metric ("min" or "max")
-    num_samples=10, # Number of times to sample from the hyperparameter space
-    scheduler=ASHAScheduler(
-        metric="loss",
-        mode="min",
-        max_t=100,
-        grace_period=10,
-        reduction_factor=2
-    )
-)
+def save_best_trial(study, trial):
+    if study.best_trial.number == trial.number:
+        # Save the best model
+        joblib.dump(trial.params, 'best_LSTM_params.pkl')
+        print(f"Saved new best parameters with loss-value: {trial.value}")
 
 
-ray.shutdown()  # Ensure that Ray is not already running
-ray.init(num_cpus=1)  # Adjust to the number of CPUs you want to use
+study = optuna.create_study(direction='minimize')
+study.optimize(objective, n_trials=1, callbacks=[save_best_trial])  # Adjust n_trials for the number of combinations you want to explore
 
-result = tune.run(
-    train_model,
-    config=config,
-    resources_per_trial={"cpu": 1},
-    num_samples=1,
-    scheduler=scheduler,
-    progress_reporter=reporter,
-)
+trial = study.best_trial
+print(f"\nBest trial:\n{trial}")
 
-best_trial = result.get_best_trial("loss", "min", "last")
-print("Best trial config: {}".format(best_trial.config))
-print("Best trial final validation loss: {}".format(best_trial.last_result["loss"]))
-print("Best trial final validation accuracy: {}".format(best_trial.last_result["accuracy"]))
+print(f"  Value: {trial.value}")
 
+print("  Params: ")
+for key, value in trial.params.items():
+    print(f"    {key}: {value}")
