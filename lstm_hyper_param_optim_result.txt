@@ -1,0 +1,21 @@
+  Value: 0.19322045147418976
+  Params: 
+    random_data_split: True
+    train_split: 0.7
+    standarization: True
+    shuffle_train: True
+    shuffle_validation: False
+    shuffle_test: True
+    use_attention: False
+    use_dropout: True
+    use_xavier_init: False
+    num_epochs: 80
+    batch_size: 32
+    window_size: 4
+    hidden_size: 128
+    num_layers: 8
+    learning_rate: 0.005
+    dropout_prob: 0.3
+    alpha_loss: 0
+    focal_loss: True
+    gamma_loss: 3.5

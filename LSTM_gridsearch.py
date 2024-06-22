@@ -10,15 +10,21 @@ import numpy as np
 
 
 # Input Output
-input_size = 8
+input_size = 23
 num_classes = 5
 load_dataset = pd.read_csv('df_final.csv')
 game = 'game'
 round = 'round'
 target = 'target'
 selected_features = ['game', 'round', # game and round must be first for dataprocessing
-    'max_acc_value', 'games played prior on current day', 'experience score', 'after2_mean', 'after3_min',
-    'before1_mean', 'after3_max', 'winner_streak',
+    'confidence score', 'games played prior on current day',
+    'winner_streak', 'max_acc_value', 'time_diff_max_acc',
+    'before3_mean', 'before3_min', 'before3_max',
+    'before2_mean', 'before2_min', 'before2_max',
+    'before1_mean', 'before1_min', 'before1_max',
+    'after1_mean', 'after1_min', 'after1_max',
+    'after2_mean', 'after2_min', 'after2_max',
+    'after3_mean', 'after3_min', 'after3_max',
     'target'] # target must be the last item
 dataset = load_dataset[selected_features]
 target_labels = {0: 'hit_correct',
@@ -29,7 +35,7 @@ target_labels = {0: 'hit_correct',
 
 # CHOICES
 # Train, Validation, Test
-random_data_split = False
+random_data_split = True
 if random_data_split:
     train_split = 0.7
     validation_split = 0.15
@@ -39,28 +45,28 @@ else: # split based on game number, ignore 0
     validation_split = (0, 5)
     test_split = (0, 1)
 # Standarization of inputs
-standarization = False
+standarization = True
 # Shuffle dataloaders
-shuffle_train = False
+shuffle_train = True
 shuffle_validation = False
 shuffle_test = False
 # Model choices
 use_attention = False
-use_dropout = False
+use_dropout = True
 use_xavier_init = False
 
 # Hyperparameters
-num_epochs = 64
+num_epochs = 200
 batch_size = 32
-window_size = 2 # sequence length (i.e. number of rounds)
-hidden_size = 64
-num_layers = 16
+window_size = 4 # sequence length (i.e. number of rounds)
+hidden_size = 128
+num_layers = 8
 learning_rate = 0.005
-dropout_prob = 0.5
+dropout_prob = 0.3
 
 # Loss function
 alpha_loss = 0 # loss function's weight scaling, 1: proportional, 0: uniform
-focal_loss = False
+focal_loss = True
 if focal_loss:
     gamma_loss = 3.5 # higher values penalizes easy classes
 
@@ -403,8 +409,10 @@ def run_manual():
     evaluate_model(model, test_loader)
 
 
-# run_manual()
+run_manual()
 
+
+#########################################################################
 
 import optuna
 import joblib
@@ -478,14 +486,15 @@ def save_best_trial(study, trial):
         print(f"Saved new best parameters with loss-value: {trial.value}")
 
 
-study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=1, callbacks=[save_best_trial])  # Adjust n_trials for the number of combinations you want to explore
+def hyper_param_optim():
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=500, callbacks=[save_best_trial])  # Adjust n_trials for the number of combinations you want to explore
 
-trial = study.best_trial
-print(f"\nBest trial:\n{trial}")
+    trial = study.best_trial
+    print(f"\nBest trial:\n{trial}")
 
-print(f"  Value: {trial.value}")
+    print(f"  Value: {trial.value}")
 
-print("  Params: ")
-for key, value in trial.params.items():
-    print(f"    {key}: {value}")
+    print("  Params: ")
+    for key, value in trial.params.items():
+        print(f"    {key}: {value}")
