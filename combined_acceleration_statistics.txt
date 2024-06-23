@@ -1,0 +1,5 @@
+Combined Statistics for Absolute Acceleration:
+Mean: 0.938085999421611
+Standard Deviation: 2.0422281612015283
+Minimum: 0.001339864556
+Maximum: 130.3515548

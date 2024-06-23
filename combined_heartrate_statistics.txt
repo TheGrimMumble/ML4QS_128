@@ -1,0 +1,5 @@
+Combined Statistics for Heart Rate:
+Mean: 77.2399758098666
+Standard Deviation: 7.801598125757941
+Minimum: 54.0833
+Maximum: 109.729

@@ -1,0 +1,6 @@
+Combined Statistics for Confidence Score:
+Mean: 2.7565789473684212
+Standard Deviation: 0.6649818035309465
+Minimum: 1.0
+Maximum: 4.0
+Percentage of Missing Values: 5.88235294117647%
